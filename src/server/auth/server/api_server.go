@@ -743,21 +743,6 @@ func (a *apiServer) GetAdmins(ctx context.Context, req *auth.GetAdminsRequest) (
 func (a *apiServer) GetClusterRoleBindings(ctx context.Context, req *auth.GetClusterRoleBindingsRequest) (resp *auth.GetClusterRoleBindingsResponse, retErr error) {
 	a.LogReq(req)
 	defer func(start time.Time) { a.LogResp(req, resp, retErr, time.Since(start)) }(time.Now())
-	switch a.activationState() {
-	case none:
-		return nil, auth.ErrNotActivated
-	case partial:
-		return nil, auth.ErrPartiallyActivated
-	case full:
-		// Get calling user. There is no auth check to see the list of cluster
-		// admins, other than that the user must log in. Otherwise how will users
-		// know who to ask for admin privileges? Requiring the user to be logged in
-		// mitigates phishing
-		_, err := a.getAuthenticatedUser(ctx)
-		if err != nil {
-			return nil, err
-		}
-	}
 
 	a.adminMu.Lock()
 	defer a.adminMu.Unlock()
@@ -816,22 +801,6 @@ func (a *apiServer) applyClusterRoleBindings(ctx context.Context, roleBindings m
 		return auth.ErrNotActivated
 	case partial:
 		return auth.ErrPartiallyActivated
-	}
-
-	// Get calling user. The user must be an admin to change the list of admins
-	callerInfo, err := a.getAuthenticatedUser(ctx)
-	if err != nil {
-		return err
-	}
-	isAdmin, err := a.hasClusterRole(ctx, callerInfo.Subject, auth.ClusterRole_SUPER)
-	if err != nil {
-		return err
-	}
-	if !isAdmin {
-		return &auth.ErrNotAuthorized{
-			Subject: callerInfo.Subject,
-			AdminOp: "ModifyClusterRoleBinding",
-		}
 	}
 
 	// Don't allow users to modify role bindings for the root user. This ensures the root user always has
@@ -1704,18 +1673,9 @@ func (a *apiServer) GetACLInTransaction(
 		return nil, errors.Errorf("invalid request: must provide name of repo to get that repo's ACL")
 	}
 
-	// Get calling user
-	callerInfo, err := a.getAuthenticatedUser(txnCtx.ClientContext)
-	if err != nil {
-		return nil, err
-	}
-	if err := a.expiredClusterAdminCheck(txnCtx.ClientContext, callerInfo.Subject); err != nil {
-		return nil, err
-	}
-
 	// Read repo ACL from etcd
 	acl := &auth.ACL{}
-	if err = a.acls.ReadWrite(txnCtx.Stm).Get(req.Repo, acl); err != nil && !col.IsErrNotFound(err) {
+	if err := a.acls.ReadWrite(txnCtx.Stm).Get(req.Repo, acl); err != nil && !col.IsErrNotFound(err) {
 		return nil, err
 	}
 	response := &auth.GetACLResponse{
@@ -1727,8 +1687,6 @@ func (a *apiServer) GetACLInTransaction(
 			Scope:    scope,
 		})
 	}
-	// For now, no access is require to read a repo's ACL
-	// https://github.com/pachyderm/pachyderm/issues/2353
 	return response, nil
 }
 
@@ -2069,22 +2027,6 @@ func (a *apiServer) ExtendAuthToken(ctx context.Context, req *auth.ExtendAuthTok
 		return nil, errors.Errorf("invalid request: ExtendAuthTokenRequest.TTL must be > 0")
 	}
 
-	// Only admins can extend auth tokens (for now)
-	callerInfo, err := a.getAuthenticatedUser(ctx)
-	if err != nil {
-		return nil, err
-	}
-	isAdmin, err := a.hasClusterRole(ctx, callerInfo.Subject, auth.ClusterRole_SUPER)
-	if err != nil {
-		return nil, err
-	}
-	if !isAdmin {
-		return nil, &auth.ErrNotAuthorized{
-			Subject: callerInfo.Subject,
-			AdminOp: "ExtendAuthToken",
-		}
-	}
-
 	// Only let people extend tokens by up to 30 days (the equivalent of logging
 	// in again)
 	if req.TTL > defaultSessionTTLSecs {
@@ -2233,22 +2175,6 @@ func (a *apiServer) SetGroupsForUser(ctx context.Context, req *auth.SetGroupsFor
 		return nil, auth.ErrNotActivated
 	}
 
-	callerInfo, err := a.getAuthenticatedUser(ctx)
-	if err != nil {
-		return nil, err
-	}
-	isAdmin, err := a.hasClusterRole(ctx, callerInfo.Subject, auth.ClusterRole_SUPER)
-	if err != nil {
-		return nil, err
-	}
-
-	if !isAdmin {
-		return nil, &auth.ErrNotAuthorized{
-			Subject: callerInfo.Subject,
-			AdminOp: "SetGroupsForUser",
-		}
-	}
-
 	subject, err := a.canonicalizeSubject(ctx, req.Username)
 	if err != nil {
 		return nil, err
@@ -2266,22 +2192,6 @@ func (a *apiServer) ModifyMembers(ctx context.Context, req *auth.ModifyMembersRe
 	defer func(start time.Time) { a.LogResp(req, resp, retErr, time.Since(start)) }(time.Now())
 	if a.activationState() != full {
 		return nil, auth.ErrNotActivated
-	}
-
-	callerInfo, err := a.getAuthenticatedUser(ctx)
-	if err != nil {
-		return nil, err
-	}
-	isAdmin, err := a.hasClusterRole(ctx, callerInfo.Subject, auth.ClusterRole_SUPER)
-	if err != nil {
-		return nil, err
-	}
-
-	if !isAdmin {
-		return nil, &auth.ErrNotAuthorized{
-			Subject: callerInfo.Subject,
-			AdminOp: "ModifyMembers",
-		}
 	}
 
 	add, err := a.canonicalizeSubjects(ctx, req.Add)
@@ -2418,22 +2328,6 @@ func (a *apiServer) GetUsers(ctx context.Context, req *auth.GetUsersRequest) (re
 	defer func(start time.Time) { a.LogResp(req, resp, retErr, time.Since(start)) }(time.Now())
 	if a.activationState() != full {
 		return nil, auth.ErrNotActivated
-	}
-
-	callerInfo, err := a.getAuthenticatedUser(ctx)
-	if err != nil {
-		return nil, err
-	}
-	isAdmin, err := a.hasClusterRole(ctx, callerInfo.Subject, auth.ClusterRole_SUPER)
-	if err != nil {
-		return nil, err
-	}
-
-	if !isAdmin {
-		return nil, &auth.ErrNotAuthorized{
-			Subject: callerInfo.Subject,
-			AdminOp: "GetUsers",
-		}
 	}
 
 	// Filter by group
@@ -2612,11 +2506,6 @@ func (a *apiServer) GetConfiguration(ctx context.Context, req *auth.GetConfigura
 		return nil, auth.ErrPartiallyActivated
 	}
 
-	// Get calling user. The user must be logged in to get the cluster config
-	if _, err := a.getAuthenticatedUser(ctx); err != nil {
-		return nil, err
-	}
-
 	// Retrieve & return configuration
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
@@ -2659,22 +2548,6 @@ func (a *apiServer) SetConfiguration(ctx context.Context, req *auth.SetConfigura
 		return nil, auth.ErrNotActivated
 	case partial:
 		return nil, auth.ErrPartiallyActivated
-	}
-
-	// Get calling user. The user must be an admin to set the cluster config
-	callerInfo, err := a.getAuthenticatedUser(ctx)
-	if err != nil {
-		return nil, err
-	}
-	isAdmin, err := a.hasClusterRole(ctx, callerInfo.Subject, auth.ClusterRole_SUPER)
-	if err != nil {
-		return nil, err
-	}
-	if !isAdmin {
-		return nil, &auth.ErrNotAuthorized{
-			Subject: callerInfo.Subject,
-			AdminOp: "SetConfiguration",
-		}
 	}
 
 	var reqConfigVersion int64
@@ -2732,22 +2605,6 @@ func (a *apiServer) ExtractAuthTokens(ctx context.Context, req *auth.ExtractAuth
 	// credentials.
 	defer func(start time.Time) { a.LogResp(nil, nil, retErr, time.Since(start)) }(time.Now())
 
-	// Get calling user. The user must be an admin to extract auth tokens.
-	callerInfo, err := a.getAuthenticatedUser(ctx)
-	if err != nil {
-		return nil, err
-	}
-	isAdmin, err := a.hasClusterRole(ctx, callerInfo.Subject, auth.ClusterRole_SUPER)
-	if err != nil {
-		return nil, err
-	}
-	if !isAdmin {
-		return nil, &auth.ErrNotAuthorized{
-			Subject: callerInfo.Subject,
-			AdminOp: "ExtractAuthTokens",
-		}
-	}
-
 	extracted := make([]*auth.HashedAuthToken, 0)
 
 	tokens := a.tokens.ReadOnly(ctx)
@@ -2797,22 +2654,6 @@ func (a *apiServer) RestoreAuthToken(ctx context.Context, req *auth.RestoreAuthT
 	// We don't want to actually log the request/response since they contain
 	// credentials.
 	defer func(start time.Time) { a.LogResp(nil, nil, retErr, time.Since(start)) }(time.Now())
-
-	// Get calling user. The user must be an admin to restore an auth token
-	callerInfo, err := a.getAuthenticatedUser(ctx)
-	if err != nil {
-		return nil, err
-	}
-	isAdmin, err := a.hasClusterRole(ctx, callerInfo.Subject, auth.ClusterRole_SUPER)
-	if err != nil {
-		return nil, err
-	}
-	if !isAdmin {
-		return nil, &auth.ErrNotAuthorized{
-			Subject: callerInfo.Subject,
-			AdminOp: "RestoreAuthToken",
-		}
-	}
 
 	var ttl int64
 	if req.Token.Expiration != nil {
