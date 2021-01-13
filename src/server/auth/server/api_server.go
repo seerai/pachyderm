@@ -2508,7 +2508,7 @@ func (a *apiServer) GetConfiguration(ctx context.Context, req *auth.GetConfigura
 	}
 
 	// Retrieve & return configuration
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 	authConfigRO := a.authConfig.ReadOnly(ctx)
 
